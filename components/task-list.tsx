@@ -28,7 +28,20 @@ import {
   ListFilter,
   Loader2,
   Inbox,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react"
+
+const ITEMS_PER_PAGE = 9 // 3x3 grid
+
+interface Pagination {
+  page: number
+  limit: number
+  total: number
+  totalPages: number
+  hasNextPage: boolean
+  hasPrevPage: boolean
+}
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json())
 
@@ -37,6 +50,7 @@ export function TaskList() {
   const [search, setSearch] = useState("")
   const [sort, setSort] = useState("created_at")
   const [order, setOrder] = useState("desc")
+  const [page, setPage] = useState(1)
 
   // Dialog state
   const [createOpen, setCreateOpen] = useState(false)
@@ -44,12 +58,22 @@ export function TaskList() {
   const [deleteId, setDeleteId] = useState<number | null>(null)
   const [deleting, setDeleting] = useState(false)
 
-  // Build URL with filters
+  // Reset to page 1 whenever filters change
+  function updateFilter<T>(setter: (v: T) => void) {
+    return (value: T) => {
+      setter(value)
+      setPage(1)
+    }
+  }
+
+  // Build URL with all filters + pagination
   const params = new URLSearchParams()
   if (statusFilter !== "all") params.set("status", statusFilter)
   if (search) params.set("search", search)
   params.set("sort", sort)
   params.set("order", order)
+  params.set("page", String(page))
+  params.set("limit", String(ITEMS_PER_PAGE))
 
   const { data, isLoading, mutate } = useSWR(
     `/api/tasks?${params.toString()}`,
@@ -58,6 +82,7 @@ export function TaskList() {
   )
 
   const tasks: Task[] = data?.tasks || []
+  const pagination: Pagination | undefined = data?.pagination
 
   const handleSuccess = useCallback(() => {
     mutate()
@@ -69,6 +94,8 @@ export function TaskList() {
     try {
       const res = await fetch(`/api/tasks/${deleteId}`, { method: "DELETE" })
       if (res.ok) {
+        // If we deleted the last item on this page, go back one page
+        if (tasks.length === 1 && page > 1) setPage((p) => p - 1)
         mutate()
       }
     } finally {
@@ -79,34 +106,30 @@ export function TaskList() {
 
   function toggleOrder() {
     setOrder((prev) => (prev === "desc" ? "asc" : "desc"))
-  }
-
-  const taskCounts = {
-    all: tasks.length,
-    todo: tasks.filter((t) => t.status === "todo").length,
-    "in-progress": tasks.filter((t) => t.status === "in-progress").length,
-    done: tasks.filter((t) => t.status === "done").length,
+    setPage(1)
   }
 
   return (
     <div className="flex flex-col gap-6">
-      {/* Stats */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        {[
-          { label: "Total", count: taskCounts.all, color: "bg-foreground/10 text-foreground" },
-          { label: "To Do", count: taskCounts.todo, color: "bg-muted text-muted-foreground" },
-          { label: "In Progress", count: taskCounts["in-progress"], color: "bg-secondary text-secondary-foreground" },
-          { label: "Done", count: taskCounts.done, color: "bg-primary/10 text-foreground" },
-        ].map((stat) => (
-          <div
-            key={stat.label}
-            className={`flex flex-col items-center gap-1 rounded-lg border px-4 py-3 ${stat.color}`}
-          >
-            <span className="text-2xl font-bold">{stat.count}</span>
-            <span className="text-xs font-medium">{stat.label}</span>
-          </div>
-        ))}
-      </div>
+      {/* Stats strip */}
+      {pagination && (
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          {[
+            { label: "Total", count: pagination.total, color: "bg-foreground/10 text-foreground" },
+            { label: "Page", count: `${pagination.page} / ${pagination.totalPages || 1}`, color: "bg-muted text-muted-foreground" },
+            { label: "Per Page", count: ITEMS_PER_PAGE, color: "bg-secondary text-secondary-foreground" },
+            { label: "Showing", count: tasks.length, color: "bg-primary/10 text-foreground" },
+          ].map((stat) => (
+            <div
+              key={stat.label}
+              className={`flex flex-col items-center gap-1 rounded-lg border px-4 py-3 ${stat.color}`}
+            >
+              <span className="text-2xl font-bold">{stat.count}</span>
+              <span className="text-xs font-medium">{stat.label}</span>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Toolbar */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -116,11 +139,11 @@ export function TaskList() {
             <Input
               placeholder="Search tasks..."
               value={search}
-              onChange={(e) => setSearch(e.target.value)}
+              onChange={(e) => { setSearch(e.target.value); setPage(1) }}
               className="pl-9"
             />
           </div>
-          <Select value={statusFilter} onValueChange={setStatusFilter}>
+          <Select value={statusFilter} onValueChange={updateFilter(setStatusFilter)}>
             <SelectTrigger className="w-[140px]">
               <ListFilter className="size-4 text-muted-foreground" />
               <SelectValue placeholder="Filter" />
@@ -134,7 +157,7 @@ export function TaskList() {
           </Select>
         </div>
         <div className="flex items-center gap-2">
-          <Select value={sort} onValueChange={setSort}>
+          <Select value={sort} onValueChange={updateFilter(setSort)}>
             <SelectTrigger className="w-[140px]">
               <SelectValue placeholder="Sort by" />
             </SelectTrigger>
@@ -169,7 +192,7 @@ export function TaskList() {
         <div className="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed py-20">
           <Inbox className="size-12 text-muted-foreground/50" />
           <div className="text-center">
-            <p className="font-medium text-foreground">No tasks yet</p>
+            <p className="font-medium text-foreground">No tasks found</p>
             <p className="text-sm text-muted-foreground">
               {search || statusFilter !== "all"
                 ? "Try adjusting your filters"
@@ -197,6 +220,44 @@ export function TaskList() {
               onDelete={(id) => setDeleteId(id)}
             />
           ))}
+        </div>
+      )}
+
+      {/* Pagination Controls */}
+      {pagination && pagination.totalPages > 1 && (
+        <div className="flex items-center justify-between border-t pt-4">
+          <p className="text-sm text-muted-foreground">
+            Showing{" "}
+            <span className="font-medium text-foreground">
+              {(pagination.page - 1) * pagination.limit + 1}–
+              {Math.min(pagination.page * pagination.limit, pagination.total)}
+            </span>{" "}
+            of{" "}
+            <span className="font-medium text-foreground">{pagination.total}</span> tasks
+          </p>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setPage((p) => p - 1)}
+              disabled={!pagination.hasPrevPage || isLoading}
+            >
+              <ChevronLeft className="size-4" />
+              Previous
+            </Button>
+            <span className="text-sm font-medium px-2">
+              {pagination.page} / {pagination.totalPages}
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setPage((p) => p + 1)}
+              disabled={!pagination.hasNextPage || isLoading}
+            >
+              Next
+              <ChevronRight className="size-4" />
+            </Button>
+          </div>
         </div>
       )}
 
@@ -230,8 +291,7 @@ export function TaskList() {
           <DialogHeader>
             <DialogTitle>Delete Task</DialogTitle>
             <DialogDescription>
-              Are you sure you want to delete this task? This action cannot be
-              undone.
+              Are you sure you want to delete this task? This action cannot be undone.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

@@ -4,7 +4,8 @@ import { getSession } from "@/lib/auth"
 import { taskSchema } from "@/lib/validations"
 import { encrypt, decrypt } from "@/lib/crypto"
 
-// GET /api/tasks - List all tasks for the authenticated user
+// GET /api/tasks - List tasks for the authenticated user
+// Supports: ?status= &search= &sort= &order= &page= &limit=
 export async function GET(request: NextRequest) {
   const session = await getSession()
   if (!session) {
@@ -14,79 +15,81 @@ export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams
   const status = searchParams.get("status")
   const search = searchParams.get("search")
-  const sort = searchParams.get("sort") || "created_at"
-  const order = searchParams.get("order") || "desc"
 
-  // Validate sort and order to prevent injection
+  // Validate sort/order against allowlist — these are injected into raw SQL
   const validSorts = ["created_at", "updated_at", "title", "status"]
   const validOrders = ["asc", "desc"]
-  const safeSort = validSorts.includes(sort) ? sort : "created_at"
-  const safeOrder = validOrders.includes(order) ? order : "desc"
+  const sort = validSorts.includes(searchParams.get("sort") ?? "")
+    ? searchParams.get("sort")!
+    : "created_at"
+  const order = validOrders.includes(searchParams.get("order") ?? "")
+    ? searchParams.get("order")!
+    : "desc"
 
-  let tasks
+  // Pagination
+  const page = Math.max(1, parseInt(searchParams.get("page") || "1", 10))
+  const limit = Math.min(50, Math.max(1, parseInt(searchParams.get("limit") || "10", 10)))
+  const offset = (page - 1) * limit
+
+  // ORDER BY clause is safe: both values passed through allowlist above
+  const orderBy = `${sort} ${order}`
+
+  // Use sql(string, params[]) form so we can inject the pre-validated ORDER BY
+  // as a string while still using $N placeholders for all user-supplied values
+  let tasks, countResult
 
   if (status && search) {
-    tasks = await sql`
-      SELECT * FROM tasks
-      WHERE user_id = ${session.userId}
-        AND status = ${status}
-        AND (title ILIKE ${"%" + search + "%"} OR description ILIKE ${"%" + search + "%"})
-      ORDER BY
-        CASE WHEN ${safeSort} = 'created_at' AND ${safeOrder} = 'desc' THEN created_at END DESC,
-        CASE WHEN ${safeSort} = 'created_at' AND ${safeOrder} = 'asc' THEN created_at END ASC,
-        CASE WHEN ${safeSort} = 'updated_at' AND ${safeOrder} = 'desc' THEN updated_at END DESC,
-        CASE WHEN ${safeSort} = 'updated_at' AND ${safeOrder} = 'asc' THEN updated_at END ASC,
-        CASE WHEN ${safeSort} = 'title' AND ${safeOrder} = 'desc' THEN title END DESC,
-        CASE WHEN ${safeSort} = 'title' AND ${safeOrder} = 'asc' THEN title END ASC,
-        CASE WHEN ${safeSort} = 'status' AND ${safeOrder} = 'desc' THEN status END DESC,
-        CASE WHEN ${safeSort} = 'status' AND ${safeOrder} = 'asc' THEN status END ASC
-    `
+    const pattern = `%${search}%`
+    ;[tasks, countResult] = await Promise.all([
+      sql(
+        `SELECT * FROM tasks WHERE user_id = $1 AND status = $2 AND (title ILIKE $3 OR description ILIKE $3) ORDER BY ${orderBy} LIMIT $4 OFFSET $5`,
+        [session.userId, status, pattern, limit, offset]
+      ),
+      sql(
+        `SELECT COUNT(*)::int AS total FROM tasks WHERE user_id = $1 AND status = $2 AND (title ILIKE $3 OR description ILIKE $3)`,
+        [session.userId, status, pattern]
+      ),
+    ])
   } else if (status) {
-    tasks = await sql`
-      SELECT * FROM tasks
-      WHERE user_id = ${session.userId} AND status = ${status}
-      ORDER BY
-        CASE WHEN ${safeSort} = 'created_at' AND ${safeOrder} = 'desc' THEN created_at END DESC,
-        CASE WHEN ${safeSort} = 'created_at' AND ${safeOrder} = 'asc' THEN created_at END ASC,
-        CASE WHEN ${safeSort} = 'updated_at' AND ${safeOrder} = 'desc' THEN updated_at END DESC,
-        CASE WHEN ${safeSort} = 'updated_at' AND ${safeOrder} = 'asc' THEN updated_at END ASC,
-        CASE WHEN ${safeSort} = 'title' AND ${safeOrder} = 'desc' THEN title END DESC,
-        CASE WHEN ${safeSort} = 'title' AND ${safeOrder} = 'asc' THEN title END ASC,
-        CASE WHEN ${safeSort} = 'status' AND ${safeOrder} = 'desc' THEN status END DESC,
-        CASE WHEN ${safeSort} = 'status' AND ${safeOrder} = 'asc' THEN status END ASC
-    `
+    ;[tasks, countResult] = await Promise.all([
+      sql(
+        `SELECT * FROM tasks WHERE user_id = $1 AND status = $2 ORDER BY ${orderBy} LIMIT $3 OFFSET $4`,
+        [session.userId, status, limit, offset]
+      ),
+      sql(
+        `SELECT COUNT(*)::int AS total FROM tasks WHERE user_id = $1 AND status = $2`,
+        [session.userId, status]
+      ),
+    ])
   } else if (search) {
-    tasks = await sql`
-      SELECT * FROM tasks
-      WHERE user_id = ${session.userId}
-        AND (title ILIKE ${"%" + search + "%"} OR description ILIKE ${"%" + search + "%"})
-      ORDER BY
-        CASE WHEN ${safeSort} = 'created_at' AND ${safeOrder} = 'desc' THEN created_at END DESC,
-        CASE WHEN ${safeSort} = 'created_at' AND ${safeOrder} = 'asc' THEN created_at END ASC,
-        CASE WHEN ${safeSort} = 'updated_at' AND ${safeOrder} = 'desc' THEN updated_at END DESC,
-        CASE WHEN ${safeSort} = 'updated_at' AND ${safeOrder} = 'asc' THEN updated_at END ASC,
-        CASE WHEN ${safeSort} = 'title' AND ${safeOrder} = 'desc' THEN title END DESC,
-        CASE WHEN ${safeSort} = 'title' AND ${safeOrder} = 'asc' THEN title END ASC,
-        CASE WHEN ${safeSort} = 'status' AND ${safeOrder} = 'desc' THEN status END DESC,
-        CASE WHEN ${safeSort} = 'status' AND ${safeOrder} = 'asc' THEN status END ASC
-    `
+    const pattern = `%${search}%`
+    ;[tasks, countResult] = await Promise.all([
+      sql(
+        `SELECT * FROM tasks WHERE user_id = $1 AND (title ILIKE $2 OR description ILIKE $2) ORDER BY ${orderBy} LIMIT $3 OFFSET $4`,
+        [session.userId, pattern, limit, offset]
+      ),
+      sql(
+        `SELECT COUNT(*)::int AS total FROM tasks WHERE user_id = $1 AND (title ILIKE $2 OR description ILIKE $2)`,
+        [session.userId, pattern]
+      ),
+    ])
   } else {
-    tasks = await sql`
-      SELECT * FROM tasks
-      WHERE user_id = ${session.userId}
-      ORDER BY
-        CASE WHEN ${safeSort} = 'created_at' AND ${safeOrder} = 'desc' THEN created_at END DESC,
-        CASE WHEN ${safeSort} = 'created_at' AND ${safeOrder} = 'asc' THEN created_at END ASC,
-        CASE WHEN ${safeSort} = 'updated_at' AND ${safeOrder} = 'desc' THEN updated_at END DESC,
-        CASE WHEN ${safeSort} = 'updated_at' AND ${safeOrder} = 'asc' THEN updated_at END ASC,
-        CASE WHEN ${safeSort} = 'title' AND ${safeOrder} = 'desc' THEN title END DESC,
-        CASE WHEN ${safeSort} = 'title' AND ${safeOrder} = 'asc' THEN title END ASC,
-        CASE WHEN ${safeSort} = 'status' AND ${safeOrder} = 'desc' THEN status END DESC,
-        CASE WHEN ${safeSort} = 'status' AND ${safeOrder} = 'asc' THEN status END ASC
-    `
+    ;[tasks, countResult] = await Promise.all([
+      sql(
+        `SELECT * FROM tasks WHERE user_id = $1 ORDER BY ${orderBy} LIMIT $2 OFFSET $3`,
+        [session.userId, limit, offset]
+      ),
+      sql(
+        `SELECT COUNT(*)::int AS total FROM tasks WHERE user_id = $1`,
+        [session.userId]
+      ),
+    ])
   }
 
-  // Decrypt descriptions
+  const total: number = countResult[0]?.total ?? 0
+  const totalPages = Math.ceil(total / limit)
+
+  // Decrypt descriptions before returning
   const decryptedTasks = await Promise.all(
     tasks.map(async (task) => ({
       ...task,
@@ -94,7 +97,17 @@ export async function GET(request: NextRequest) {
     }))
   )
 
-  return NextResponse.json({ tasks: decryptedTasks })
+  return NextResponse.json({
+    tasks: decryptedTasks,
+    pagination: {
+      page,
+      limit,
+      total,
+      totalPages,
+      hasNextPage: page < totalPages,
+      hasPrevPage: page > 1,
+    },
+  })
 }
 
 // POST /api/tasks - Create a new task
@@ -116,8 +129,6 @@ export async function POST(request: Request) {
     }
 
     const { title, description, status } = parsed.data
-
-    // Encrypt description
     const encryptedDescription = await encrypt(description || "")
 
     const result = await sql`

@@ -1,10 +1,15 @@
 import { SignJWT, jwtVerify } from "jose"
 import { cookies } from "next/headers"
 
-const JWT_SECRET = new TextEncoder().encode(
-  process.env.JWT_SECRET || "fallback-secret-change-in-production-1234567890"
-)
+// Fail fast if JWT_SECRET is not set in the environment
+if (!process.env.JWT_SECRET) {
+  throw new Error(
+    "Missing environment variable: JWT_SECRET. " +
+    "Set it in .env.local (development) or your hosting provider's environment config (production)."
+  )
+}
 
+const JWT_SECRET = new TextEncoder().encode(process.env.JWT_SECRET)
 const COOKIE_NAME = "auth_token"
 
 export interface JWTPayload {
